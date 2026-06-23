@@ -20,6 +20,9 @@ Claude Code enforces two rolling rate limits: a **5-hour session window** and a 
 | **Colour-coded dot**            | Green (under pace) → Yellow → Orange → Red (burning fast)                                                                                                                                  |
 | **Both windows** in the popover | Progress bars for the 5h and 7d windows, each with their own pace badge                                                                                                                    |
 | **Burn-all forecast**           | Shows how many full 5-hour sessions remain before the weekly reset and whether you can exhaust your weekly budget — based on the model that one maxed-out 5h session ≈ 11% of weekly usage |
+| **Reset notifications**         | Sends a push notification when the 5-hour or 7-day window resets                                                                                                                           |
+| **Smart polling**               | Skips API calls while the 5h session is maxed — nothing changes until the window resets                                                                                                    |
+| **Resilient on errors**         | On rate-limit (429) or server errors, old values stay visible; a warning appears in the footer rather than replacing your data                                                             |
 | **Auto-refresh**                | Polls every 2 minutes; manual refresh button always available                                                                                                                              |
 | **Keychain auth**               | Reads the OAuth token that Claude Code already stores — no API key setup required                                                                                                          |
 
@@ -50,24 +53,26 @@ If you can't exhaust the limit, the forecast shows how much budget will expire u
 
 ## Build & Run
 
-```bash
-# Build
-swift build -c release
+Use the included script to build a proper `.app` bundle (required for push notifications):
 
-# Run
-.build/release/ClaudeTray
+```bash
+bash build-app.sh
+open dist/ClaudeTray.app
 ```
 
-On first launch, macOS will prompt for Keychain access — choose **Always Allow**.
+This compiles the binary with `swift build -c release` and wraps it in `dist/ClaudeTray.app` with the necessary `Info.plist`. The `dist/` directory is gitignored.
+
+On first launch, macOS will prompt for Keychain access — choose **Always Allow**. If you want reset notifications, also allow the notification permission prompt.
 
 ### Auto-start on login
 
+Copy the app to your Applications folder and add it as a Login Item:
+
 ```bash
-cp .build/release/ClaudeTray /usr/local/bin/ClaudeTray
+cp -r dist/ClaudeTray.app /Applications/ClaudeTray.app
 ```
 
-Then add `/usr/local/bin/ClaudeTray` as a Login Item in  
-**System Settings → General → Login Items & Extensions**.
+Then go to **System Settings → General → Login Items & Extensions** and add `/Applications/ClaudeTray.app`.
 
 ## License
 
