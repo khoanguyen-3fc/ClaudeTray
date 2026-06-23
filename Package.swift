@@ -8,7 +8,7 @@ let package = Package(
         .executableTarget(
             name: "ClaudeTray",
             path: ".",
-            exclude: ["LICENSE", "README.md", "Info.plist", "build-app.sh", "images", "dist"],
+            exclude: ["LICENSE", "README.md", "Info.plist", "build-app.sh", "make-icon.swift", "images", "dist", "AppIcon.icns"],
             sources: ["ClaudeTray.swift"]
         )
     ]

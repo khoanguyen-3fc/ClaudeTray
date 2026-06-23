@@ -14,6 +14,8 @@
     <string>1.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>NSUserNotificationsUsageDescription</key>
     <string>ClaudeTray notifies you when your Claude session windows reset.</string>
 </dict>

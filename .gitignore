@@ -1,5 +1,7 @@
 # Project-specific
 dist/
+AppIcon.icns
+AppIcon.iconset/
 
 # Xcode
 #
