@@ -1,5 +1,6 @@
 import SwiftUI
 import Security
+import UserNotifications
 
 // MARK: - Data
 
@@ -87,6 +88,9 @@ final class ClaudeMonitor: ObservableObject {
     }
 
     init() {
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
         Task { await fetch() }
         timer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
             Task { await self?.fetch() }
@@ -126,14 +130,32 @@ final class ClaudeMonitor: ObservableObject {
             let usage = try JSONDecoder().decode(UsageResponse.self, from: data)
             fiveHour = usage.fiveHour?.utilization ?? 0
             sevenDay = usage.sevenDay?.utilization ?? 0
-            fiveHourReset = usage.fiveHour?.resetsAt.flatMap(parseISO8601)
-            sevenDayReset = usage.sevenDay?.resetsAt.flatMap(parseISO8601)
+            let newFiveHourReset = usage.fiveHour?.resetsAt.flatMap(parseISO8601)
+            let newSevenDayReset = usage.sevenDay?.resetsAt.flatMap(parseISO8601)
+            if newFiveHourReset != fiveHourReset { scheduleResetNotification(id: "5h", title: "5-hour session reset", body: "Your 5-hour Claude window has reset — ready to go.", at: newFiveHourReset) }
+            if newSevenDayReset != sevenDayReset  { scheduleResetNotification(id: "7d", title: "Weekly limit reset",     body: "Your 7-day Claude budget has reset — full capacity restored.", at: newSevenDayReset) }
+            fiveHourReset = newFiveHourReset
+            sevenDayReset = newSevenDayReset
             lastUpdated = Date()
             fatalError = nil
             transientError = nil
         } catch {
             transientError = error.localizedDescription
         }
+    }
+
+    private func scheduleResetNotification(id: String, title: String, body: String, at date: Date?) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: ["claudetray.\(id)"])
+        guard let date, date > Date() else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+        center.add(UNNotificationRequest(identifier: "claudetray.\(id)", content: content, trigger: trigger))
     }
 
     // macOS prompts for Keychain access on first launch — choose "Always Allow"
