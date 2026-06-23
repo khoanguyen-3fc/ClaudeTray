@@ -38,7 +38,8 @@ final class ClaudeMonitor: ObservableObject {
     @Published var fiveHourReset: Date?
     @Published var sevenDayReset: Date?
     @Published var lastUpdated: Date?
-    @Published var error: String?
+    @Published var fatalError: String?    // auth/credential failure — hides usage rows
+    @Published var transientError: String? // 429/5xx/network — keeps old values, shown in footer
     @Published var isLoading = false
 
     private var timer: Timer?
@@ -100,16 +101,27 @@ final class ClaudeMonitor: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         guard let token = keychainToken() else {
-            error = "Credentials not found.\nRun Claude Code first, then allow\nKeychain access when prompted."
+            fatalError = "Credentials not found.\nRun Claude Code first, then allow\nKeychain access when prompted."
             return
         }
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
-            if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
-                error = "HTTP \(http.statusCode) — token may need refresh.\nRestart Claude Code to re-authenticate."
-                return
+            if let http = resp as? HTTPURLResponse {
+                switch http.statusCode {
+                case 200:
+                    break
+                case 401:
+                    fatalError = "Authentication failed — restart Claude Code to re-authenticate."
+                    return
+                case 429:
+                    transientError = "Rate limited"
+                    return
+                default:
+                    transientError = "Server error (\(http.statusCode))"
+                    return
+                }
             }
             let usage = try JSONDecoder().decode(UsageResponse.self, from: data)
             fiveHour = usage.fiveHour?.utilization ?? 0
@@ -117,9 +129,10 @@ final class ClaudeMonitor: ObservableObject {
             fiveHourReset = usage.fiveHour?.resetsAt.flatMap(parseISO8601)
             sevenDayReset = usage.sevenDay?.resetsAt.flatMap(parseISO8601)
             lastUpdated = Date()
-            error = nil
+            fatalError = nil
+            transientError = nil
         } catch {
-            self.error = error.localizedDescription
+            transientError = error.localizedDescription
         }
     }
 
@@ -314,7 +327,7 @@ struct PopoverView: View {
 
             Divider()
 
-            if let err = monitor.error {
+            if let err = monitor.fatalError {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -331,15 +344,21 @@ struct PopoverView: View {
             Divider()
 
             HStack {
-                if let d = monitor.lastUpdated {
-                    Text("Updated \(d, style: .relative) ago")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    Text("Loading…")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                Group {
+                    if let d = monitor.lastUpdated {
+                        if let warn = monitor.transientError {
+                            Text("Updated \(d, style: .relative) ago · \(warn)")
+                                .foregroundStyle(.orange)
+                        } else {
+                            Text("Updated \(d, style: .relative) ago")
+                                .foregroundStyle(.tertiary)
+                        }
+                    } else if monitor.fatalError == nil {
+                        Text("Loading…")
+                            .foregroundStyle(.tertiary)
+                    }
                 }
+                .font(.caption2)
                 Spacer()
                 Button {
                     Task { await monitor.fetch() }
@@ -382,7 +401,7 @@ struct ClaudeTrayApp: App {
             PopoverView(monitor: monitor)
         } label: {
             HStack(spacing: 4) {
-                if monitor.error != nil, monitor.lastUpdated == nil {
+                if monitor.fatalError != nil, monitor.lastUpdated == nil {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 12))
                 } else if let p = monitor.fiveHourPace {
