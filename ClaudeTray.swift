@@ -93,6 +93,10 @@ final class ClaudeMonitor: ObservableObject {
     }
 
     func fetch() async {
+        // No point hitting the server while the 5h window is maxed — nothing will change
+        if fiveHour >= 100, let reset = fiveHourReset, reset > Date() {
+            return
+        }
         isLoading = true
         defer { isLoading = false }
         guard let token = keychainToken() else {
