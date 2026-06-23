@@ -51,6 +51,10 @@ If you can't exhaust the limit, the forecast shows how much budget will expire u
 - [Claude Code](https://claude.ai/code) installed and signed in (provides the Keychain credentials)
 - Swift 5.9+ (ships with Xcode 15+)
 
+## Don't want to build it yourself?
+
+Ironic as it sounds — just open Claude Code and ask it to run `bash build-app.sh` for you. It built this whole thing already, it won't mind.
+
 ## Build & Run
 
 Use the included script to build a proper `.app` bundle (required for push notifications):
