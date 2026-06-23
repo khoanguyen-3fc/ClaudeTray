@@ -108,7 +108,16 @@ final class ClaudeMonitor: ObservableObject {
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            var (data, resp) = try await URLSession.shared.data(for: req)
+            // On 401, bust the cache and retry once with a fresh keychain read
+            if (resp as? HTTPURLResponse)?.statusCode == 401 {
+                cachedToken = nil
+                tokenExpiresAt = nil
+                if let freshToken = keychainToken() {
+                    req.setValue("Bearer \(freshToken)", forHTTPHeaderField: "Authorization")
+                    (data, resp) = try await URLSession.shared.data(for: req)
+                }
+            }
             if let http = resp as? HTTPURLResponse {
                 switch http.statusCode {
                 case 200:

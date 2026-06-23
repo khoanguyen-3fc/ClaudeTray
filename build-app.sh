@@ -24,5 +24,5 @@ cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "$APP"
 echo "Signed: $APP"
 
-echo "Built: $APP"
-echo "Run:   open $APP"
+echo "Built:  $APP"
+echo "Run:    open $APP"
