@@ -182,6 +182,12 @@ func paceColor(_ pace: Double) -> Color {
 
 func resetLabel(for date: Date?) -> String {
     guard let date else { return "no active window" }
+    if Calendar.current.isDateInToday(date) {
+        let rounded = Date(timeIntervalSince1970: (date.timeIntervalSince1970 / 60).rounded() * 60)
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        return "resets at \(fmt.string(from: rounded))"
+    }
     let fmt = RelativeDateTimeFormatter()
     fmt.unitsStyle = .short
     return "resets \(fmt.localizedString(for: date, relativeTo: .now))"
