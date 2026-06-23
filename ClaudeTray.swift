@@ -88,9 +88,6 @@ final class ClaudeMonitor: ObservableObject {
     }
 
     init() {
-        if Bundle.main.bundleIdentifier != nil {
-            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-        }
         Task { await fetch() }
         timer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
             Task { await self?.fetch() }
@@ -408,6 +405,14 @@ struct PopoverView: View {
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error {
+                print("[ClaudeTray] Notification auth error: \(error.localizedDescription)")
+            } else {
+                print("[ClaudeTray] Notification permission: \(granted ? "granted" : "denied")")
+            }
+        }
     }
 }
 

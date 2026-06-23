@@ -20,5 +20,9 @@ cp .build/release/ClaudeTray "$APP/Contents/MacOS/ClaudeTray"
 cp Info.plist "$APP/Contents/Info.plist"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
+# Ad-hoc sign — required for UNUserNotificationCenter to work
+codesign --force --deep --sign - "$APP"
+echo "Signed: $APP"
+
 echo "Built: $APP"
 echo "Run:   open $APP"
