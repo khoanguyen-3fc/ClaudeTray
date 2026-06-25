@@ -46,6 +46,7 @@ final class ClaudeMonitor: ObservableObject {
     private var timer: Timer?
     private var cachedToken: String?
     private var tokenExpiresAt: Date?
+    private var keychainTokenExpired = false
 
     // % above/below linear pace within each window (+ = burning faster than time is passing)
     var fiveHourPace: Double? {
@@ -88,7 +89,7 @@ final class ClaudeMonitor: ObservableObject {
     }
 
     init() {
-        if keychainToken() == nil {
+        if keychainToken() == nil && !keychainTokenExpired {
             let alert = NSAlert()
             alert.messageText = "Claude credentials not found"
             alert.informativeText = "Sign in to Claude Code first, then relaunch ClaudeTray.\n\nIf you already signed in, relaunch and choose \"Always Allow\" when macOS prompts for Keychain access."
@@ -121,7 +122,12 @@ final class ClaudeMonitor: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         guard let token = keychainToken() else {
-            fatalError = "Credentials not found.\nRun Claude Code first, then allow\nKeychain access when prompted."
+            if keychainTokenExpired {
+                transientError = "Token expired — reopen Claude Code to refresh"
+                scheduleNextFetch()
+            } else {
+                fatalError = "Credentials not found.\nRun Claude Code first, then allow\nKeychain access when prompted."
+            }
             return
         }
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
@@ -189,9 +195,12 @@ final class ClaudeMonitor: ObservableObject {
     // macOS prompts for Keychain access on first launch — choose "Always Allow"
     // Subsequent calls use the in-memory cache until the token expires.
     private func keychainToken() -> String? {
+        keychainTokenExpired = false
         if let token = cachedToken, let expiry = tokenExpiresAt, expiry > Date() {
             return token
         }
+        cachedToken = nil
+        tokenExpiresAt = nil
         let queries: [[String: Any]] = [
             [kSecClass as String: kSecClassGenericPassword,
              kSecAttrService as String: "Claude Code-credentials",
@@ -212,7 +221,12 @@ final class ClaudeMonitor: ObservableObject {
                   let token = oauth["accessToken"] as? String
             else { continue }
             if let ms = oauth["expiresAt"] as? Double {
-                tokenExpiresAt = Date(timeIntervalSince1970: ms / 1000)
+                let expiry = Date(timeIntervalSince1970: ms / 1000)
+                if expiry <= Date() {
+                    keychainTokenExpired = true
+                    return nil
+                }
+                tokenExpiresAt = expiry
             }
             cachedToken = token
             return token
