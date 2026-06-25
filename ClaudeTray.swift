@@ -88,6 +88,16 @@ final class ClaudeMonitor: ObservableObject {
     }
 
     init() {
+        if keychainToken() == nil {
+            let alert = NSAlert()
+            alert.messageText = "Claude credentials not found"
+            alert.informativeText = "Sign in to Claude Code first, then relaunch ClaudeTray.\n\nIf you already signed in, relaunch and choose \"Always Allow\" when macOS prompts for Keychain access."
+            alert.alertStyle = .critical
+            alert.addButton(withTitle: "Quit")
+            alert.runModal()
+            NSApp.terminate(nil)
+            return
+        }
         Task { await fetch() }
         timer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
             Task { await self?.fetch() }
