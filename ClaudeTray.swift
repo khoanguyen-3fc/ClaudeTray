@@ -99,7 +99,16 @@ final class ClaudeMonitor: ObservableObject {
             return
         }
         Task { await fetch() }
-        timer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
+    }
+
+    func fetchIfStale(olderThan seconds: TimeInterval = 120) async {
+        let stale = lastUpdated.map { Date().timeIntervalSince($0) > seconds } ?? true
+        if stale { await fetch() }
+    }
+
+    private func scheduleNextFetch() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 600, repeats: false) { [weak self] _ in
             Task { await self?.fetch() }
         }
     }
@@ -158,6 +167,7 @@ final class ClaudeMonitor: ObservableObject {
         } catch {
             transientError = error.localizedDescription
         }
+        scheduleNextFetch()
     }
 
     private func scheduleResetNotification(id: String, title: String, body: String, at date: Date?) {
@@ -416,6 +426,9 @@ struct PopoverView: View {
         }
         .padding(14)
         .frame(width: 270)
+        .onAppear {
+            Task { await monitor.fetchIfStale() }
+        }
     }
 }
 
