@@ -138,6 +138,8 @@ final class ClaudeMonitor: ObservableObject {
                 }
             }
             if let http = resp as? HTTPURLResponse {
+                let body = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+                print("[ClaudeTray] HTTP \(http.statusCode) — \(body)")
                 switch http.statusCode {
                 case 200:
                     break
