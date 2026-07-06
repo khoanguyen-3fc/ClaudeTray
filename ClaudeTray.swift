@@ -46,7 +46,15 @@ final class ClaudeMonitor: ObservableObject {
     private var timer: Timer?
     private var cachedToken: String?
     private var tokenExpiresAt: Date?
-    private var keychainTokenExpired = false
+
+    // Outcome of a Keychain read — distinguishes "no credentials" (fatal) from
+    // recoverable states (expired token, or access denied/not-yet-granted).
+    private enum TokenState {
+        case ok(String)
+        case expired   // item present but past expiresAt — Claude Code will refresh it
+        case denied    // read blocked: user cancelled, auth failed, or UI not allowed
+        case missing   // no credential item at all
+    }
 
     // % above/below linear pace within each window (+ = burning faster than time is passing)
     var fiveHourPace: Double? {
@@ -89,7 +97,9 @@ final class ClaudeMonitor: ObservableObject {
     }
 
     init() {
-        if keychainToken() == nil && !keychainTokenExpired {
+        // Only quit when there are genuinely no credentials. An expired token or a
+        // denied/not-yet-granted read is recoverable — start up and let fetch() retry.
+        if case .missing = keychainToken() {
             let alert = NSAlert()
             alert.messageText = "Claude credentials not found"
             alert.informativeText = "Sign in to Claude Code first, then relaunch ClaudeTray.\n\nIf you already signed in, relaunch and choose \"Always Allow\" when macOS prompts for Keychain access."
@@ -121,13 +131,23 @@ final class ClaudeMonitor: ObservableObject {
         }
         isLoading = true
         defer { isLoading = false }
-        guard let token = keychainToken() else {
-            if keychainTokenExpired {
-                transientError = "Token expired — reopen Claude Code to refresh"
-                scheduleNextFetch()
-            } else {
-                fatalError = "Credentials not found.\nRun Claude Code first, then allow\nKeychain access when prompted."
-            }
+        let token: String
+        switch keychainToken() {
+        case .ok(let t):
+            token = t
+        case .expired:
+            // Don't fetch with a known-bad token — Claude Code refreshes it on its own.
+            transientError = "Token expired — reopen Claude Code to refresh"
+            scheduleNextFetch()
+            return
+        case .denied:
+            // ACL was reset (e.g. after Claude Code refreshed the token). Keep old
+            // values, retry on schedule / next popover open — no need to restart.
+            transientError = "Keychain access needed — allow when prompted"
+            scheduleNextFetch()
+            return
+        case .missing:
+            fatalError = "Credentials not found.\nRun Claude Code first, then allow\nKeychain access when prompted."
             return
         }
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
@@ -138,7 +158,7 @@ final class ClaudeMonitor: ObservableObject {
             if (resp as? HTTPURLResponse)?.statusCode == 401 {
                 cachedToken = nil
                 tokenExpiresAt = nil
-                if let freshToken = keychainToken() {
+                if case .ok(let freshToken) = keychainToken() {
                     req.setValue("Bearer \(freshToken)", forHTTPHeaderField: "Authorization")
                     (data, resp) = try await URLSession.shared.data(for: req)
                 }
@@ -192,12 +212,15 @@ final class ClaudeMonitor: ObservableObject {
         center.add(UNNotificationRequest(identifier: "claudetray.\(id)", content: content, trigger: trigger))
     }
 
-    // macOS prompts for Keychain access on first launch — choose "Always Allow"
-    // Subsequent calls use the in-memory cache until the token expires.
-    private func keychainToken() -> String? {
-        keychainTokenExpired = false
+    // macOS prompts for Keychain access on first launch — choose "Always Allow".
+    // Subsequent calls use the in-memory cache until the token expires. Note: when
+    // Claude Code refreshes the token it rewrites the Keychain item, which resets the
+    // item's access list — so macOS may prompt again on the next read. That surfaces
+    // here as .denied if the prompt is dismissed / can't be shown; we recover rather
+    // than treating it as missing credentials.
+    private func keychainToken() -> TokenState {
         if let token = cachedToken, let expiry = tokenExpiresAt, expiry > Date() {
-            return token
+            return .ok(token)
         }
         cachedToken = nil
         tokenExpiresAt = nil
@@ -212,26 +235,31 @@ final class ClaudeMonitor: ObservableObject {
              kSecReturnData as String: true,
              kSecMatchLimit as String: kSecMatchLimitOne]
         ]
+        var denied = false
         for q in queries {
             var out: AnyObject?
-            guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
-                  let data = out as? Data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let oauth = json["claudeAiOauth"] as? [String: Any],
-                  let token = oauth["accessToken"] as? String
-            else { continue }
-            if let ms = oauth["expiresAt"] as? Double {
-                let expiry = Date(timeIntervalSince1970: ms / 1000)
-                if expiry <= Date() {
-                    keychainTokenExpired = true
-                    return nil
+            let status = SecItemCopyMatching(q as CFDictionary, &out)
+            switch status {
+            case errSecSuccess:
+                guard let data = out as? Data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let oauth = json["claudeAiOauth"] as? [String: Any],
+                      let token = oauth["accessToken"] as? String
+                else { continue }
+                if let ms = oauth["expiresAt"] as? Double {
+                    let expiry = Date(timeIntervalSince1970: ms / 1000)
+                    if expiry <= Date() { return .expired }
+                    tokenExpiresAt = expiry
                 }
-                tokenExpiresAt = expiry
+                cachedToken = token
+                return .ok(token)
+            case errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowed:
+                denied = true          // access blocked, not absent — recoverable
+            default:
+                break                  // errSecItemNotFound and friends → try next query
             }
-            cachedToken = token
-            return token
         }
-        return nil
+        return denied ? .denied : .missing
     }
 }
 
@@ -409,20 +437,20 @@ struct PopoverView: View {
 
             HStack {
                 Group {
-                    if let d = monitor.lastUpdated {
-                        if let warn = monitor.transientError {
+                    if let warn = monitor.transientError {
+                        if let d = monitor.lastUpdated {
                             Text("Updated \(d, style: .relative) ago · \(warn)")
-                                .foregroundStyle(.orange)
                         } else {
-                            Text("Updated \(d, style: .relative) ago")
-                                .foregroundStyle(.tertiary)
+                            Text(warn)
                         }
+                    } else if let d = monitor.lastUpdated {
+                        Text("Updated \(d, style: .relative) ago")
                     } else if monitor.fatalError == nil {
                         Text("Loading…")
-                            .foregroundStyle(.tertiary)
                     }
                 }
                 .font(.caption2)
+                .foregroundStyle(monitor.transientError != nil ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
                 Spacer()
                 Button {
                     Task { await monitor.fetch() }
