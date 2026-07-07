@@ -119,14 +119,24 @@ final class ClaudeMonitor: ObservableObject {
 
     private func scheduleNextFetch() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 600, repeats: false) { [weak self] _ in
+        let now = Date()
+        // Default 10-min poll, but if a window resets sooner, wake up right then so
+        // the freshly-reset values show up on their own. Small buffer lets the server
+        // reflect the reset before we read.
+        var delay: TimeInterval = 600
+        for reset in [fiveHourReset, sevenDayReset].compactMap({ $0 }) where reset > now {
+            delay = min(delay, reset.timeIntervalSince(now) + 20)
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             Task { await self?.fetch() }
         }
     }
 
     func fetch() async {
-        // No point hitting the server while the 5h window is maxed — nothing will change
+        // No point hitting the server while the 5h window is maxed — nothing changes
+        // until it resets. Still reschedule so we auto-fetch the moment it resets.
         if fiveHour >= 100, let reset = fiveHourReset, reset > Date() {
+            scheduleNextFetch()
             return
         }
         isLoading = true
