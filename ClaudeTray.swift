@@ -43,7 +43,12 @@ final class ClaudeMonitor: ObservableObject {
     @Published var transientError: String? // 429/5xx/network — keeps old values, shown in footer
     @Published var isLoading = false
 
+    // Advanced by a lightweight ticker so time-based values (pace, forecast) stay
+    // live between fetches — including while the 5h window is maxed and we don't poll.
+    @Published private var now = Date()
+
     private var timer: Timer?
+    private var tickTimer: Timer?
     private var cachedToken: String?
     private var tokenExpiresAt: Date?
 
@@ -60,7 +65,7 @@ final class ClaudeMonitor: ObservableObject {
     var fiveHourPace: Double? {
         guard let resetDate = fiveHourReset else { return nil }
         let windowStart = resetDate.addingTimeInterval(-5 * 3600)
-        let elapsed = max(0, Date().timeIntervalSince(windowStart))
+        let elapsed = max(0, now.timeIntervalSince(windowStart))
         let fraction = min(elapsed / (5 * 3600), 1)
         return fiveHour - fraction * 100
     }
@@ -68,7 +73,7 @@ final class ClaudeMonitor: ObservableObject {
     var sevenDayPace: Double? {
         guard let resetDate = sevenDayReset else { return nil }
         let windowStart = resetDate.addingTimeInterval(-7 * 24 * 3600)
-        let elapsed = max(0, Date().timeIntervalSince(windowStart))
+        let elapsed = max(0, now.timeIntervalSince(windowStart))
         let fraction = min(elapsed / (7 * 24 * 3600), 1)
         return sevenDay - fraction * 100
     }
@@ -78,14 +83,14 @@ final class ClaudeMonitor: ObservableObject {
         guard let resetDate = sevenDayReset else { return nil }
         let remaining = max(0, 100 - sevenDay)
         guard remaining > 0 else { return nil }
-        let hoursLeft = resetDate.timeIntervalSinceNow / 3600
+        let hoursLeft = resetDate.timeIntervalSince(now) / 3600
         guard hoursLeft > 0 else { return nil }
         let sessionsLeft = Int(hoursLeft / 5)
         let maxBurnable = min(Double(sessionsLeft) * 11, remaining)
         let canExhaust = Double(sessionsLeft) * 11 >= remaining
         var exhaustDate: Date? = nil
         if canExhaust {
-            exhaustDate = Date().addingTimeInterval(ceil(remaining / 11) * 5 * 3600)
+            exhaustDate = now.addingTimeInterval(ceil(remaining / 11) * 5 * 3600)
         }
         return BurnForecast(
             weeklyRemaining: remaining,
@@ -108,6 +113,11 @@ final class ClaudeMonitor: ObservableObject {
             alert.runModal()
             NSApp.terminate(nil)
             return
+        }
+        // Keep the displayed pace/forecast current without hitting the server. The 5h
+        // integer pace drifts ~1% every 3 min, so a 30s tick is smooth enough.
+        tickTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.now = Date() }
         }
         Task { await fetch() }
     }
