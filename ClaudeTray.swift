@@ -115,9 +115,10 @@ final class ClaudeMonitor: ObservableObject {
             NSApp.terminate(nil)
             return
         }
-        // Keep the displayed pace/forecast current without hitting the server. The 5h
-        // integer pace drifts ~1% every 3 min, so a 30s tick is smooth enough.
-        let ticker = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+        // Re-render time-based values (pace, forecast) from the last fetched
+        // utilization — no network. 3 min = 1% of the 5h window, the granularity at
+        // which the displayed integer pace actually moves.
+        let ticker = Timer(timeInterval: 180, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.now = Date()
