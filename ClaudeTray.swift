@@ -167,10 +167,12 @@ final class ClaudeMonitor: ObservableObject {
     }
 
     func fetch() async {
+        // Reschedule on EVERY exit path — early returns (429/5xx/fatal) previously
+        // skipped the trailing call and silently killed polling.
+        defer { scheduleNextFetch() }
         // No point hitting the server while the 5h window is maxed — nothing changes
-        // until it resets. Still reschedule so we auto-fetch the moment it resets.
+        // until it resets. The reschedule wakes us the moment it does.
         if fiveHour >= 100, let reset = fiveHourReset, reset > Date() {
-            scheduleNextFetch()
             return
         }
         lastFetchAttempt = Date()
@@ -183,13 +185,11 @@ final class ClaudeMonitor: ObservableObject {
         case .expired:
             // Don't fetch with a known-bad token — Claude Code refreshes it on its own.
             transientError = "Token expired — reopen Claude Code to refresh"
-            scheduleNextFetch()
             return
         case .denied:
             // ACL was reset (e.g. after Claude Code refreshed the token). Keep old
             // values, retry on schedule / next popover open — no need to restart.
             transientError = "Keychain access needed — allow when prompted"
-            scheduleNextFetch()
             return
         case .missing:
             fatalError = "Credentials not found.\nRun Claude Code first, then allow\nKeychain access when prompted."
@@ -240,7 +240,6 @@ final class ClaudeMonitor: ObservableObject {
         } catch {
             transientError = error.localizedDescription
         }
-        scheduleNextFetch()
     }
 
     private func scheduleResetNotification(id: String, title: String, body: String, at date: Date?) {
