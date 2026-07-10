@@ -49,6 +49,7 @@ final class ClaudeMonitor: ObservableObject {
 
     private var timer: Timer?
     private var tickTimer: Timer?
+    private var lastFetchAttempt: Date?
     private var cachedToken: String?
     private var tokenExpiresAt: Date?
 
@@ -116,9 +117,29 @@ final class ClaudeMonitor: ObservableObject {
         }
         // Keep the displayed pace/forecast current without hitting the server. The 5h
         // integer pace drifts ~1% every 3 min, so a 30s tick is smooth enough.
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.now = Date() }
+        let ticker = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.now = Date()
+                // Safety net: App Nap or system sleep can delay the one-shot fetch
+                // timer past a window reset — the "limit reset" notification fires on
+                // time (it's system-delivered) but the tray would keep stale values.
+                // If a reset passed and we haven't fetched since, fetch now.
+                let lastFetch = self.lastUpdated ?? .distantPast
+                let resetPassed = [self.fiveHourReset, self.sevenDayReset]
+                    .compactMap { $0 }
+                    .contains { $0 <= self.now && lastFetch < $0 }
+                let attemptedRecently = self.lastFetchAttempt
+                    .map { self.now.timeIntervalSince($0) < 60 } ?? false
+                if resetPassed, !self.isLoading, !attemptedRecently {
+                    await self.fetch()
+                }
+            }
         }
+        ticker.tolerance = 5
+        // .common mode so ticks keep firing while the popover/menu is tracking
+        RunLoop.main.add(ticker, forMode: .common)
+        tickTimer = ticker
         Task { await fetch() }
     }
 
@@ -137,9 +158,12 @@ final class ClaudeMonitor: ObservableObject {
         for reset in [fiveHourReset, sevenDayReset].compactMap({ $0 }) where reset > now {
             delay = min(delay, reset.timeIntervalSince(now) + 20)
         }
-        timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+        let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
             Task { await self?.fetch() }
         }
+        t.tolerance = 5   // default tolerance is ~10% of interval — 60s late on a 10-min poll
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     func fetch() async {
@@ -149,6 +173,7 @@ final class ClaudeMonitor: ObservableObject {
             scheduleNextFetch()
             return
         }
+        lastFetchAttempt = Date()
         isLoading = true
         defer { isLoading = false }
         let token: String
