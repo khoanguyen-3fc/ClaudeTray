@@ -23,7 +23,7 @@ Claude Code enforces two rolling rate limits: a **5-hour session window** and a 
 | **Reset notifications**         | Sends a push notification when the 5-hour or 7-day window resets                                                                                                                           |
 | **Smart polling**               | Skips API calls while the 5h session is maxed — nothing changes until the window resets                                                                                                    |
 | **Resilient on errors**         | On rate-limit (429) or server errors, old values stay visible; a warning appears in the footer rather than replacing your data                                                             |
-| **Auto-refresh**                | Polls every 2 minutes; manual refresh button always available                                                                                                                              |
+| **Auto-refresh**                | Polls every 10 minutes, wakes exactly when a window resets, and refreshes on popover open when data is stale; manual refresh button always available                                       |
 | **Keychain auth**               | Reads the OAuth token that Claude Code already stores — no API key setup required                                                                                                          |
 
 ### Reading the pace value

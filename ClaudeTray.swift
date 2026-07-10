@@ -21,7 +21,11 @@ struct UsageResponse: Decodable {
     }
 }
 
+let fiveHourWindow: TimeInterval = 5 * 3600
+let sevenDayWindow: TimeInterval = 7 * 24 * 3600
 // Burn-all model: 1 full 5h session ≈ 11% of weekly budget
+let weeklyPctPerSession = 11.0
+
 struct BurnForecast {
     let weeklyRemaining: Double     // 100 - sevenDay
     let sessionsLeft: Int           // full 5h windows before weekly reset
@@ -62,36 +66,29 @@ final class ClaudeMonitor: ObservableObject {
         case missing   // no credential item at all
     }
 
-    // % above/below linear pace within each window (+ = burning faster than time is passing)
-    var fiveHourPace: Double? {
-        guard let resetDate = fiveHourReset else { return nil }
-        let windowStart = resetDate.addingTimeInterval(-5 * 3600)
-        let elapsed = max(0, now.timeIntervalSince(windowStart))
-        let fraction = min(elapsed / (5 * 3600), 1)
-        return fiveHour - fraction * 100
+    // % above/below linear pace within a window (+ = burning faster than time is passing)
+    private func pace(_ utilization: Double, reset: Date?, window: TimeInterval) -> Double? {
+        guard let reset else { return nil }
+        let elapsed = max(0, now.timeIntervalSince(reset.addingTimeInterval(-window)))
+        return utilization - min(elapsed / window, 1) * 100
     }
 
-    var sevenDayPace: Double? {
-        guard let resetDate = sevenDayReset else { return nil }
-        let windowStart = resetDate.addingTimeInterval(-7 * 24 * 3600)
-        let elapsed = max(0, now.timeIntervalSince(windowStart))
-        let fraction = min(elapsed / (7 * 24 * 3600), 1)
-        return sevenDay - fraction * 100
-    }
+    var fiveHourPace: Double? { pace(fiveHour, reset: fiveHourReset, window: fiveHourWindow) }
+    var sevenDayPace: Double? { pace(sevenDay, reset: sevenDayReset, window: sevenDayWindow) }
 
     // Can I exhaust the weekly limit before it resets?
     var burnForecast: BurnForecast? {
         guard let resetDate = sevenDayReset else { return nil }
         let remaining = max(0, 100 - sevenDay)
         guard remaining > 0 else { return nil }
-        let hoursLeft = resetDate.timeIntervalSince(now) / 3600
-        guard hoursLeft > 0 else { return nil }
-        let sessionsLeft = Int(hoursLeft / 5)
-        let maxBurnable = min(Double(sessionsLeft) * 11, remaining)
-        let canExhaust = Double(sessionsLeft) * 11 >= remaining
+        let timeLeft = resetDate.timeIntervalSince(now)
+        guard timeLeft > 0 else { return nil }
+        let sessionsLeft = Int(timeLeft / fiveHourWindow)
+        let maxBurnable = min(Double(sessionsLeft) * weeklyPctPerSession, remaining)
+        let canExhaust = Double(sessionsLeft) * weeklyPctPerSession >= remaining
         var exhaustDate: Date? = nil
         if canExhaust {
-            exhaustDate = now.addingTimeInterval(ceil(remaining / 11) * 5 * 3600)
+            exhaustDate = now.addingTimeInterval(ceil(remaining / weeklyPctPerSession) * fiveHourWindow)
         }
         return BurnForecast(
             weeklyRemaining: remaining,
@@ -119,29 +116,28 @@ final class ClaudeMonitor: ObservableObject {
         // utilization — no network. 3 min = 1% of the 5h window, the granularity at
         // which the displayed integer pace actually moves.
         let ticker = Timer(timeInterval: 180, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.now = Date()
-                // Safety net: App Nap or system sleep can delay the one-shot fetch
-                // timer past a window reset — the "limit reset" notification fires on
-                // time (it's system-delivered) but the tray would keep stale values.
-                // If a reset passed and we haven't fetched since, fetch now.
-                let lastFetch = self.lastUpdated ?? .distantPast
-                let resetPassed = [self.fiveHourReset, self.sevenDayReset]
-                    .compactMap { $0 }
-                    .contains { $0 <= self.now && lastFetch < $0 }
-                let attemptedRecently = self.lastFetchAttempt
-                    .map { self.now.timeIntervalSince($0) < 60 } ?? false
-                if resetPassed, !self.isLoading, !attemptedRecently {
-                    await self.fetch()
-                }
-            }
+            Task { @MainActor in await self?.tick() }
         }
         ticker.tolerance = 5
         // .common mode so ticks keep firing while the popover/menu is tracking
         RunLoop.main.add(ticker, forMode: .common)
         tickTimer = ticker
         Task { await fetch() }
+    }
+
+    private func tick() async {
+        now = Date()
+        // Safety net: App Nap or system sleep can delay the one-shot fetch timer past
+        // a window reset — the "limit reset" notification fires on time (it's
+        // system-delivered) but the tray would keep stale values. If a reset passed
+        // and we haven't fetched since, fetch now (at most one attempt per 60s).
+        let lastFetch = lastUpdated ?? .distantPast
+        let resetPassed = [fiveHourReset, sevenDayReset].compactMap { $0 }
+            .contains { $0 <= now && lastFetch < $0 }
+        let attemptedRecently = lastFetchAttempt.map { now.timeIntervalSince($0) < 60 } ?? false
+        if resetPassed, !attemptedRecently {
+            await fetch()
+        }
     }
 
     func fetchIfStale(olderThan seconds: TimeInterval = 120) async {
@@ -151,13 +147,13 @@ final class ClaudeMonitor: ObservableObject {
 
     private func scheduleNextFetch() {
         timer?.invalidate()
-        let now = Date()
+        let current = Date()
         // Default 10-min poll, but if a window resets sooner, wake up right then so
         // the freshly-reset values show up on their own. Small buffer lets the server
         // reflect the reset before we read.
         var delay: TimeInterval = 600
-        for reset in [fiveHourReset, sevenDayReset].compactMap({ $0 }) where reset > now {
-            delay = min(delay, reset.timeIntervalSince(now) + 20)
+        for reset in [fiveHourReset, sevenDayReset].compactMap({ $0 }) where reset > current {
+            delay = min(delay, reset.timeIntervalSince(current) + 20)
         }
         let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
             Task { await self?.fetch() }
@@ -168,6 +164,9 @@ final class ClaudeMonitor: ObservableObject {
     }
 
     func fetch() async {
+        // Timer, ticker, popover-open, and the refresh button can all trigger a fetch;
+        // don't stack them. The in-flight fetch will reschedule when it finishes.
+        if isLoading { return }
         // Reschedule on EVERY exit path — early returns (429/5xx/fatal) previously
         // skipped the trailing call and silently killed polling.
         defer { scheduleNextFetch() }
@@ -269,19 +268,19 @@ final class ClaudeMonitor: ObservableObject {
         }
         cachedToken = nil
         tokenExpiresAt = nil
-        let queries: [[String: Any]] = [
-            [kSecClass as String: kSecClassGenericPassword,
-             kSecAttrService as String: "Claude Code-credentials",
-             kSecReturnData as String: true,
-             kSecMatchLimit as String: kSecMatchLimitOne],
-            [kSecClass as String: kSecClassGenericPassword,
-             kSecAttrService as String: "Claude Code",
-             kSecAttrAccount as String: "credentials",
-             kSecReturnData as String: true,
-             kSecMatchLimit as String: kSecMatchLimitOne]
+        let locations: [(service: String, account: String?)] = [
+            ("Claude Code-credentials", nil),
+            ("Claude Code", "credentials")
         ]
         var denied = false
-        for q in queries {
+        for (service, account) in locations {
+            var q: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            if let account { q[kSecAttrAccount as String] = account }
             var out: AnyObject?
             let status = SecItemCopyMatching(q as CFDictionary, &out)
             switch status {
@@ -386,7 +385,7 @@ struct UsageRow: View {
                     let sign = p >= 0 ? "+" : ""
                     Text("\(sign)\(Int(p.rounded()))%")
                         .font(.caption2.weight(.medium))
-                        .foregroundStyle(p > 15 ? .red : p > 0 ? .orange : .teal)
+                        .foregroundStyle(paceColor(p))
                         .padding(.horizontal, 4)
                         .padding(.vertical, 2)
                         .background(RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.12)))
@@ -404,7 +403,7 @@ struct BurnForecastView: View {
     let forecast: BurnForecast
 
     private var sessionLine: String {
-        "\(forecast.sessionsLeft) sessions × 11% = \(Int(forecast.maxBurnable.rounded()))% max"
+        "\(forecast.sessionsLeft) sessions × \(Int(weeklyPctPerSession))% = \(Int(forecast.maxBurnable.rounded()))% max"
     }
 
     private var outcomeIcon: String {
@@ -544,6 +543,14 @@ struct ClaudeTrayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var monitor = ClaudeMonitor()
 
+    // 5h pace when a window is active, raw utilization otherwise
+    private var trayStatus: (Color, String) {
+        if let p = monitor.fiveHourPace {
+            return (paceColor(p), "\(p >= 0 ? "+" : "")\(Int(p.rounded()))%")
+        }
+        return (statusColor(monitor.fiveHour), "\(Int(monitor.fiveHour.rounded()))%")
+    }
+
     var body: some Scene {
         MenuBarExtra {
             PopoverView(monitor: monitor)
@@ -552,19 +559,12 @@ struct ClaudeTrayApp: App {
                 if monitor.fatalError != nil, monitor.lastUpdated == nil {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 12))
-                } else if let p = monitor.fiveHourPace {
-                    let sign = p >= 0 ? "+" : ""
-                    Circle()
-                        .fill(paceColor(p))
-                        .frame(width: 7, height: 7)
-                    Text("\(sign)\(Int(p.rounded()))%")
-                        .font(.system(size: 12, weight: .medium).monospacedDigit())
                 } else {
-                    // No active 5h window — show raw utilization
+                    let (color, text) = trayStatus
                     Circle()
-                        .fill(statusColor(monitor.fiveHour))
+                        .fill(color)
                         .frame(width: 7, height: 7)
-                    Text("\(Int(monitor.fiveHour.rounded()))%")
+                    Text(text)
                         .font(.system(size: 12, weight: .medium).monospacedDigit())
                 }
             }
