@@ -89,6 +89,8 @@ final class ClaudeMonitor: ObservableObject {
     var fiveHourPace: Double? { pace(fiveHour, reset: fiveHourReset, window: fiveHourWindow) }
     var sevenDayPace: Double? { pace(sevenDay, reset: sevenDayReset, window: sevenDayWindow) }
 
+    private var resetDates: [Date] { [fiveHourReset, sevenDayReset].compactMap { $0 } }
+
     // Can I exhaust the weekly limit before it resets? Walks the 5h slots that fit
     // before the weekly reset, spending budget as it goes — every figure below is
     // derived from that one walk, so the summary and the detail can't disagree.
@@ -176,8 +178,7 @@ final class ClaudeMonitor: ObservableObject {
         // system-delivered) but the tray would keep stale values. If a reset passed
         // and we haven't fetched since, fetch now (at most one attempt per 60s).
         let lastFetch = lastUpdated ?? .distantPast
-        let resetPassed = [fiveHourReset, sevenDayReset].compactMap { $0 }
-            .contains { $0 <= now && lastFetch < $0 }
+        let resetPassed = resetDates.contains { $0 <= now && lastFetch < $0 }
         let attemptedRecently = lastFetchAttempt.map { now.timeIntervalSince($0) < 60 } ?? false
         if resetPassed, !attemptedRecently {
             await fetch()
@@ -196,7 +197,7 @@ final class ClaudeMonitor: ObservableObject {
         // the freshly-reset values show up on their own. Small buffer lets the server
         // reflect the reset before we read.
         var delay: TimeInterval = 600
-        for reset in [fiveHourReset, sevenDayReset].compactMap({ $0 }) where reset > current {
+        for reset in resetDates where reset > current {
             delay = min(delay, reset.timeIntervalSince(current) + 20)
         }
         let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
@@ -274,8 +275,16 @@ final class ClaudeMonitor: ObservableObject {
             sevenDay = usage.sevenDay?.utilization ?? 0
             let newFiveHourReset = usage.fiveHour?.resetsAt.flatMap(parseISO8601)
             let newSevenDayReset = usage.sevenDay?.resetsAt.flatMap(parseISO8601)
-            if newFiveHourReset != fiveHourReset { scheduleResetNotification(id: "5h", title: "5-hour session reset", body: "Your 5-hour Claude window has reset — ready to go.", at: newFiveHourReset) }
-            if newSevenDayReset != sevenDayReset  { scheduleResetNotification(id: "7d", title: "Weekly limit reset",     body: "Your 7-day Claude budget has reset — full capacity restored.", at: newSevenDayReset) }
+            if newFiveHourReset != fiveHourReset {
+                scheduleResetNotification(id: "5h", at: newFiveHourReset,
+                                          title: "5-hour session reset",
+                                          body: "Your 5-hour Claude window has reset — ready to go.")
+            }
+            if newSevenDayReset != sevenDayReset {
+                scheduleResetNotification(id: "7d", at: newSevenDayReset,
+                                          title: "Weekly limit reset",
+                                          body: "Your 7-day Claude budget has reset — full capacity restored.")
+            }
             fiveHourReset = newFiveHourReset
             sevenDayReset = newSevenDayReset
             lastUpdated = Date()
@@ -286,7 +295,7 @@ final class ClaudeMonitor: ObservableObject {
         }
     }
 
-    private func scheduleResetNotification(id: String, title: String, body: String, at date: Date?) {
+    private func scheduleResetNotification(id: String, at date: Date?, title: String, body: String) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         let center = UNUserNotificationCenter.current()
         center.removePendingNotificationRequests(withIdentifiers: ["claudetray.\(id)"])
@@ -377,45 +386,57 @@ func paceColor(_ pace: Double) -> Color {
     }
 }
 
+// Formatters are expensive to build and these run on every render, so they're
+// shared. One 24-hour convention everywhere — the reset line, the forecast and the
+// session plan all name the same instants.
+enum TimeFormat {
+    static let clock = pattern("HH:mm")                    // 08:10
+    static let dayClock = pattern("EEE HH:mm")             // Tue 04:09
+    static let tomorrowClock = pattern("'tomorrow' HH:mm")
+    static let relative: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f
+    }()
+
+    private static func pattern(_ p: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.dateFormat = p
+        return f
+    }
+}
+
+// Rounding in one place, so the same instant can't render as 08:09 here and 08:10
+// there. `verbose` spells out "tomorrow" for prose; table rows just get the weekday.
+func timeLabel(_ date: Date, verbose: Bool = false) -> String {
+    let cal = Calendar.current
+    let fmt: DateFormatter
+    if cal.isDateInToday(date) {
+        fmt = TimeFormat.clock
+    } else if verbose, cal.isDateInTomorrow(date) {
+        fmt = TimeFormat.tomorrowClock
+    } else {
+        fmt = TimeFormat.dayClock
+    }
+    return fmt.string(from: Date(timeIntervalSince1970:
+        (date.timeIntervalSince1970 / 60).rounded() * 60))
+}
+
 func resetLabel(for date: Date?) -> String {
     guard let date else { return "no active window" }
     if Calendar.current.isDateInToday(date) {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm"
-        return "resets at \(fmt.string(from: roundedToMinute(date)))"
+        return "resets at \(timeLabel(date))"
     }
-    let fmt = RelativeDateTimeFormatter()
-    fmt.unitsStyle = .short
-    return "resets \(fmt.localizedString(for: date, relativeTo: .now))"
-}
-
-// Every displayed clock time rounds the same way, so the same instant can't render
-// as 08:09 in one place and 08:10 in another.
-func roundedToMinute(_ date: Date) -> Date {
-    Date(timeIntervalSince1970: (date.timeIntervalSince1970 / 60).rounded() * 60)
-}
-
-// Tight enough for a table row: "20:40" today, "Mon 01:40" otherwise
-func compactTime(_ date: Date) -> String {
-    let fmt = DateFormatter()
-    fmt.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "EEE HH:mm"
-    return fmt.string(from: roundedToMinute(date))
+    return "resets \(TimeFormat.relative.localizedString(for: date, relativeTo: .now))"
 }
 
 func pctLabel(_ v: Double) -> String {
     v > 0 && v < 10 ? String(format: "%.1f", v) : String(Int(v.rounded()))
 }
 
-func shortDateTime(_ date: Date) -> String {
-    let fmt = DateFormatter()
-    if Calendar.current.isDateInToday(date) {
-        fmt.dateFormat = "h:mma"          // 3:30PM (today)
-    } else if Calendar.current.isDateInTomorrow(date) {
-        fmt.dateFormat = "'tomorrow' h:mma"
-    } else {
-        fmt.dateFormat = "EEE h:mma"      // Mon 3:30PM
-    }
-    return fmt.string(from: roundedToMinute(date))
+// Signed pace, e.g. "+17%" / "-8%" — the tray label and the popover badge agree.
+func paceLabel(_ p: Double) -> String {
+    "\(p >= 0 ? "+" : "")\(Int(p.rounded()))%"
 }
 
 // MARK: - Views
@@ -441,8 +462,7 @@ struct UsageRow: View {
                     .foregroundStyle(statusColor(pct))
                     .frame(width: 34, alignment: .trailing)
                 if let p = pace {
-                    let sign = p >= 0 ? "+" : ""
-                    Text("\(sign)\(Int(p.rounded()))%")
+                    Text(paceLabel(p))
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(paceColor(p))
                         .padding(.horizontal, 4)
@@ -492,7 +512,7 @@ struct SessionPlanRow: View {
             Text("\(session.id + 1)")
                 .foregroundStyle(.tertiary)
                 .frame(width: 14, alignment: .trailing)
-            Text(session.isCurrent ? "now" : compactTime(session.start))
+            Text(session.isCurrent ? "now" : timeLabel(session.start))
                 .frame(width: 62, alignment: .leading)
                 .padding(.leading, 6)
             Text(spare ? "spare" : "−\(pctLabel(session.burn))%")
@@ -526,11 +546,10 @@ struct BurnForecastView: View {
 
     private var outcomeLine: String {
         if forecast.canExhaustLimit, let date = forecast.estimatedExhaustionDate {
-            return "\(Int(forecast.weeklyRemaining.rounded()))% left · limit hit ~\(shortDateTime(date))"
-        } else {
-            let unused = forecast.weeklyRemaining - forecast.maxBurnable
-            return "\(Int(unused.rounded()))% of \(Int(forecast.weeklyRemaining.rounded()))% expires unused"
+            return "\(pctLabel(forecast.weeklyRemaining))% left · limit hit ~\(timeLabel(date, verbose: true))"
         }
+        let unused = forecast.weeklyRemaining - forecast.maxBurnable
+        return "\(pctLabel(unused))% of \(pctLabel(forecast.weeklyRemaining))% expires unused"
     }
 
     var body: some View {
@@ -675,7 +694,7 @@ struct ClaudeTrayApp: App {
     // 5h pace when a window is active, raw utilization otherwise
     private var trayStatus: (Color, String) {
         if let p = monitor.fiveHourPace {
-            return (paceColor(p), "\(p >= 0 ? "+" : "")\(Int(p.rounded()))%")
+            return (paceColor(p), paceLabel(p))
         }
         return (statusColor(monitor.fiveHour), "\(Int(monitor.fiveHour.rounded()))%")
     }
