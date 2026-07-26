@@ -380,21 +380,26 @@ func paceColor(_ pace: Double) -> Color {
 func resetLabel(for date: Date?) -> String {
     guard let date else { return "no active window" }
     if Calendar.current.isDateInToday(date) {
-        let rounded = Date(timeIntervalSince1970: (date.timeIntervalSince1970 / 60).rounded() * 60)
         let fmt = DateFormatter()
         fmt.dateFormat = "HH:mm"
-        return "resets at \(fmt.string(from: rounded))"
+        return "resets at \(fmt.string(from: roundedToMinute(date)))"
     }
     let fmt = RelativeDateTimeFormatter()
     fmt.unitsStyle = .short
     return "resets \(fmt.localizedString(for: date, relativeTo: .now))"
 }
 
+// Every displayed clock time rounds the same way, so the same instant can't render
+// as 08:09 in one place and 08:10 in another.
+func roundedToMinute(_ date: Date) -> Date {
+    Date(timeIntervalSince1970: (date.timeIntervalSince1970 / 60).rounded() * 60)
+}
+
 // Tight enough for a table row: "20:40" today, "Mon 01:40" otherwise
 func compactTime(_ date: Date) -> String {
     let fmt = DateFormatter()
     fmt.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "EEE HH:mm"
-    return fmt.string(from: date)
+    return fmt.string(from: roundedToMinute(date))
 }
 
 func pctLabel(_ v: Double) -> String {
@@ -410,7 +415,7 @@ func shortDateTime(_ date: Date) -> String {
     } else {
         fmt.dateFormat = "EEE h:mma"      // Mon 3:30PM
     }
-    return fmt.string(from: date)
+    return fmt.string(from: roundedToMinute(date))
 }
 
 // MARK: - Views
