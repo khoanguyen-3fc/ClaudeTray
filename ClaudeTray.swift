@@ -347,11 +347,10 @@ func resetLabel(for date: Date?) -> String {
 }
 
 func shortDateTime(_ date: Date) -> String {
-    let h = date.timeIntervalSinceNow / 3600
     let fmt = DateFormatter()
-    if h < 14 {
+    if Calendar.current.isDateInToday(date) {
         fmt.dateFormat = "h:mma"          // 3:30PM (today)
-    } else if h < 38 {
+    } else if Calendar.current.isDateInTomorrow(date) {
         fmt.dateFormat = "'tomorrow' h:mma"
     } else {
         fmt.dateFormat = "EEE h:mma"      // Mon 3:30PM
