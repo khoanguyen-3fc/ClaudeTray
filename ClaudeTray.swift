@@ -26,13 +26,25 @@ let sevenDayWindow: TimeInterval = 7 * 24 * 3600
 // Burn-all model: 1 full 5h session ≈ 11% of weekly budget
 let weeklyPctPerSession = 11.0
 
+// One 5h slot in the burn-all plan. `burn` is 0 for slots that fit before the
+// weekly reset but aren't needed — the budget already ran out earlier.
+struct BurnSession: Identifiable {
+    let id: Int
+    let start: Date
+    let end: Date
+    let isCurrent: Bool         // the window already in progress
+    let burn: Double            // weekly % this session would consume
+    let remainingAfter: Double
+}
+
 struct BurnForecast {
     let weeklyRemaining: Double     // 100 - sevenDay
-    let sessionsLeft: Int           // full 5h windows before weekly reset
-    let sessionsNeeded: Int         // minimum 100% sessions to burn the remaining budget
-    let maxBurnable: Double         // min(sessionsLeft × 11, weeklyRemaining)
+    let sessionsLeft: Int           // 5h windows that fit before the weekly reset
+    let sessionsNeeded: Int         // minimum maxed sessions to burn the remaining budget
+    let maxBurnable: Double         // total the plan can actually consume
     let canExhaustLimit: Bool
     let estimatedExhaustionDate: Date?  // when 100% weekly is hit at max burn rate
+    let plan: [BurnSession]         // the schedule the numbers above are derived from
 }
 
 // MARK: - Monitor
@@ -77,7 +89,9 @@ final class ClaudeMonitor: ObservableObject {
     var fiveHourPace: Double? { pace(fiveHour, reset: fiveHourReset, window: fiveHourWindow) }
     var sevenDayPace: Double? { pace(sevenDay, reset: sevenDayReset, window: sevenDayWindow) }
 
-    // Can I exhaust the weekly limit before it resets?
+    // Can I exhaust the weekly limit before it resets? Walks the 5h slots that fit
+    // before the weekly reset, spending budget as it goes — every figure below is
+    // derived from that one walk, so the summary and the detail can't disagree.
     var burnForecast: BurnForecast? {
         guard let weekReset = sevenDayReset else { return nil }
         let remaining = max(0, 100 - sevenDay)
@@ -88,35 +102,44 @@ final class ClaudeMonitor: ObservableObject {
         let activeReset = fiveHourReset.flatMap { $0 > now ? $0 : nil }
         let currentCap = activeReset == nil ? 0
             : max(0, 100 - fiveHour) / 100 * weeklyPctPerSession
-        let freshStart = activeReset ?? now
-        let freshSessions = max(0, Int(weekReset.timeIntervalSince(freshStart) / fiveHourWindow))
 
-        let burnable = currentCap + Double(freshSessions) * weeklyPctPerSession
-        let canExhaust = burnable >= remaining
+        var plan: [BurnSession] = []
+        var left = remaining
+        var cursor = now
+        if let activeReset {
+            left -= min(currentCap, left)
+            plan.append(BurnSession(id: 0, start: now, end: activeReset, isCurrent: true,
+                                    burn: min(currentCap, remaining), remainingAfter: left))
+            cursor = activeReset
+        }
+        while cursor.addingTimeInterval(fiveHourWindow) <= weekReset, plan.count < 40 {
+            let end = cursor.addingTimeInterval(fiveHourWindow)
+            let burn = min(weeklyPctPerSession, left)
+            left -= burn
+            plan.append(BurnSession(id: plan.count, start: cursor, end: end, isCurrent: false,
+                                    burn: burn, remainingAfter: left))
+            cursor = end
+        }
 
-        // Spend what's left of the current window first, then whole fresh sessions.
-        let afterCurrent = remaining - currentCap
-        let sessionsNeeded = (currentCap > 0 ? 1 : 0)
-            + (afterCurrent > 0 ? Int(ceil(afterCurrent / weeklyPctPerSession)) : 0)
-
+        let canExhaust = left <= 0.0001
+        // Slots that fit can't cover it — count how many more would have been needed.
+        let sessionsNeeded = canExhaust
+            ? plan.filter { $0.burn > 0 }.count
+            : plan.count + Int(ceil(left / weeklyPctPerSession))
+        // The final session only burns what's left of the budget, so it ends early.
         var exhaustDate: Date? = nil
-        if canExhaust {
-            if afterCurrent <= 0, let activeReset {
-                // Runs out inside the current window — 11% of weekly burns over 5h
-                let finish = now.addingTimeInterval(remaining / weeklyPctPerSession * fiveHourWindow)
-                exhaustDate = min(finish, activeReset)
-            } else {
-                exhaustDate = freshStart.addingTimeInterval(
-                    ceil(afterCurrent / weeklyPctPerSession) * fiveHourWindow)
-            }
+        if canExhaust, let last = plan.last(where: { $0.burn > 0 }) {
+            let span = last.burn / weeklyPctPerSession * fiveHourWindow
+            exhaustDate = min(last.start.addingTimeInterval(span), last.end)
         }
         return BurnForecast(
             weeklyRemaining: remaining,
-            sessionsLeft: (currentCap > 0 ? 1 : 0) + freshSessions,
+            sessionsLeft: plan.count,
             sessionsNeeded: sessionsNeeded,
-            maxBurnable: min(burnable, remaining),
+            maxBurnable: remaining - left,
             canExhaustLimit: canExhaust,
-            estimatedExhaustionDate: exhaustDate
+            estimatedExhaustionDate: exhaustDate,
+            plan: plan
         )
     }
 
@@ -367,6 +390,17 @@ func resetLabel(for date: Date?) -> String {
     return "resets \(fmt.localizedString(for: date, relativeTo: .now))"
 }
 
+// Tight enough for a table row: "20:40" today, "Mon 01:40" otherwise
+func compactTime(_ date: Date) -> String {
+    let fmt = DateFormatter()
+    fmt.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "EEE HH:mm"
+    return fmt.string(from: date)
+}
+
+func pctLabel(_ v: Double) -> String {
+    v > 0 && v < 10 ? String(format: "%.1f", v) : String(Int(v.rounded()))
+}
+
 func shortDateTime(_ date: Date) -> String {
     let fmt = DateFormatter()
     if Calendar.current.isDateInToday(date) {
@@ -419,8 +453,57 @@ struct UsageRow: View {
     }
 }
 
+// A plain VStack for short plans — a ScrollView with no parent height to resolve
+// against collapses to nothing inside a MenuBarExtra window, so it only wraps the
+// list once there are more rows than fit, and then with an explicit height.
+struct SessionPlanList: View {
+    let plan: [BurnSession]
+
+    private let rowHeight: CGFloat = 16
+    private let maxRows = 8
+
+    private var rows: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(plan) { SessionPlanRow(session: $0) }
+        }
+    }
+
+    var body: some View {
+        if plan.count > maxRows {
+            ScrollView { rows }
+                .frame(height: rowHeight * CGFloat(maxRows))
+        } else {
+            rows
+        }
+    }
+}
+
+struct SessionPlanRow: View {
+    let session: BurnSession
+
+    var body: some View {
+        let spare = session.burn <= 0
+        HStack(spacing: 0) {
+            Text("\(session.id + 1)")
+                .foregroundStyle(.tertiary)
+                .frame(width: 14, alignment: .trailing)
+            Text(session.isCurrent ? "now" : compactTime(session.start))
+                .frame(width: 62, alignment: .leading)
+                .padding(.leading, 6)
+            Text(spare ? "spare" : "−\(pctLabel(session.burn))%")
+                .foregroundStyle(spare ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.purple))
+            Spacer(minLength: 4)
+            Text("\(pctLabel(session.remainingAfter))% left")
+                .foregroundStyle(session.remainingAfter <= 0.0001 ? AnyShapeStyle(Color.green) : AnyShapeStyle(.secondary))
+        }
+        .font(.caption2.monospacedDigit())
+        .opacity(spare ? 0.55 : 1)
+    }
+}
+
 struct BurnForecastView: View {
     let forecast: BurnForecast
+    @State private var expanded = false
 
     private var sessionLine: String {
         forecast.canExhaustLimit
@@ -455,14 +538,32 @@ struct BurnForecastView: View {
                     .foregroundStyle(outcomeColor)
                     .font(.caption)
                     .padding(.top, 1)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(sessionLine)
-                        .font(.caption)
-                    Text(outcomeLine)
+                VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(sessionLine)
+                            .font(.caption)
+                        Text(outcomeLine)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)   // wrap, don't truncate
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                    } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 7, weight: .semibold))
+                            Text(expanded ? "Hide plan" : "Show plan")
+                        }
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    if expanded {
+                        SessionPlanList(plan: forecast.plan)
+                    }
                 }
-                .fixedSize(horizontal: false, vertical: true)   // wrap, don't truncate
             }
         }
     }
