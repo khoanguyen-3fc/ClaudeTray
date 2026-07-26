@@ -19,7 +19,7 @@ Claude Code enforces two rolling rate limits: a **5-hour session window** and a 
 | **5h pace** in the menu bar     | Signed `+X%` / `-X%` vs. linear rate through the current 5-hour window — the primary signal                                                                                                |
 | **Colour-coded dot**            | Green (under pace) → Yellow → Orange → Red (burning fast)                                                                                                                                  |
 | **Both windows** in the popover | Progress bars for the 5h and 7d windows, each with their own pace badge                                                                                                                    |
-| **Burn-all forecast**           | Shows how many full 5-hour sessions remain before the weekly reset and whether you can exhaust your weekly budget — based on the model that one maxed-out 5h session ≈ 11% of weekly usage |
+| **Burn-all forecast**           | Shows the minimum number of maxed-out sessions needed to exhaust your weekly budget, how many still fit before the weekly reset, and when you'd hit the limit — counting the current session's leftover share, not just whole sessions |
 | **Reset notifications**         | Sends a push notification when the 5-hour or 7-day window resets                                                                                                                           |
 | **Smart polling**               | Skips API calls while the 5h session is maxed — nothing changes until the window resets                                                                                                    |
 | **Resilient on errors**         | On rate-limit (429) or server errors, old values stay visible; a warning appears in the footer rather than replacing your data                                                             |
@@ -33,12 +33,15 @@ The pace delta is `utilisation% − (time_elapsed / window_duration × 100)`.
 - **`-20%`** — you've used 20 percentage points less than the linear rate. Budget headroom remains.
 - **`+20%`** — you're 20 points ahead of pace. You'll hit the limit before the window ends at this rate.
 
-The burn-all forecast uses 11% per 5-hour session as the maximum weekly burn rate:
+The burn-all forecast uses 11% per maxed 5-hour session as the maximum weekly burn rate. The session you're already in only counts for the share it hasn't spent yet — full-value sessions start once it resets:
 
 ```
-sessions_left   = floor(hours_until_weekly_reset / 5)
-max_burnable    = sessions_left × 11%
+current_share   = (100% − 5h_utilisation) × 11%      # only if a 5h window is active
+fresh_sessions  = floor(time_from_5h_reset_to_weekly_reset / 5h)
+max_burnable    = current_share + fresh_sessions × 11%
 can_exhaust     = max_burnable ≥ weekly_remaining
+
+sessions_needed = (current window, if usable) + ceil(what's left after it / 11%)
 ```
 
 If you can't exhaust the limit, the forecast shows how much budget will expire unused.

@@ -29,6 +29,7 @@ let weeklyPctPerSession = 11.0
 struct BurnForecast {
     let weeklyRemaining: Double     // 100 - sevenDay
     let sessionsLeft: Int           // full 5h windows before weekly reset
+    let sessionsNeeded: Int         // minimum 100% sessions to burn the remaining budget
     let maxBurnable: Double         // min(sessionsLeft × 11, weeklyRemaining)
     let canExhaustLimit: Bool
     let estimatedExhaustionDate: Date?  // when 100% weekly is hit at max burn rate
@@ -78,22 +79,42 @@ final class ClaudeMonitor: ObservableObject {
 
     // Can I exhaust the weekly limit before it resets?
     var burnForecast: BurnForecast? {
-        guard let resetDate = sevenDayReset else { return nil }
+        guard let weekReset = sevenDayReset else { return nil }
         let remaining = max(0, 100 - sevenDay)
-        guard remaining > 0 else { return nil }
-        let timeLeft = resetDate.timeIntervalSince(now)
-        guard timeLeft > 0 else { return nil }
-        let sessionsLeft = Int(timeLeft / fiveHourWindow)
-        let maxBurnable = min(Double(sessionsLeft) * weeklyPctPerSession, remaining)
-        let canExhaust = Double(sessionsLeft) * weeklyPctPerSession >= remaining
+        guard remaining > 0, weekReset > now else { return nil }
+
+        // The active 5h window is already partly spent, so it can only contribute its
+        // unused share; full-value sessions only begin once it resets.
+        let activeReset = fiveHourReset.flatMap { $0 > now ? $0 : nil }
+        let currentCap = activeReset == nil ? 0
+            : max(0, 100 - fiveHour) / 100 * weeklyPctPerSession
+        let freshStart = activeReset ?? now
+        let freshSessions = max(0, Int(weekReset.timeIntervalSince(freshStart) / fiveHourWindow))
+
+        let burnable = currentCap + Double(freshSessions) * weeklyPctPerSession
+        let canExhaust = burnable >= remaining
+
+        // Spend what's left of the current window first, then whole fresh sessions.
+        let afterCurrent = remaining - currentCap
+        let sessionsNeeded = (currentCap > 0 ? 1 : 0)
+            + (afterCurrent > 0 ? Int(ceil(afterCurrent / weeklyPctPerSession)) : 0)
+
         var exhaustDate: Date? = nil
         if canExhaust {
-            exhaustDate = now.addingTimeInterval(ceil(remaining / weeklyPctPerSession) * fiveHourWindow)
+            if afterCurrent <= 0, let activeReset {
+                // Runs out inside the current window — 11% of weekly burns over 5h
+                let finish = now.addingTimeInterval(remaining / weeklyPctPerSession * fiveHourWindow)
+                exhaustDate = min(finish, activeReset)
+            } else {
+                exhaustDate = freshStart.addingTimeInterval(
+                    ceil(afterCurrent / weeklyPctPerSession) * fiveHourWindow)
+            }
         }
         return BurnForecast(
             weeklyRemaining: remaining,
-            sessionsLeft: sessionsLeft,
-            maxBurnable: maxBurnable,
+            sessionsLeft: (currentCap > 0 ? 1 : 0) + freshSessions,
+            sessionsNeeded: sessionsNeeded,
+            maxBurnable: min(burnable, remaining),
             canExhaustLimit: canExhaust,
             estimatedExhaustionDate: exhaustDate
         )
@@ -402,7 +423,9 @@ struct BurnForecastView: View {
     let forecast: BurnForecast
 
     private var sessionLine: String {
-        "\(forecast.sessionsLeft) sessions × \(Int(weeklyPctPerSession))% = \(Int(forecast.maxBurnable.rounded()))% max"
+        forecast.canExhaustLimit
+            ? "Needs \(forecast.sessionsNeeded) of \(forecast.sessionsLeft) maxed sessions"
+            : "Needs \(forecast.sessionsNeeded) sessions, only \(forecast.sessionsLeft) fit"
     }
 
     private var outcomeIcon: String {
@@ -415,10 +438,10 @@ struct BurnForecastView: View {
 
     private var outcomeLine: String {
         if forecast.canExhaustLimit, let date = forecast.estimatedExhaustionDate {
-            return "Limit hit ~\(shortDateTime(date))"
+            return "\(Int(forecast.weeklyRemaining.rounded()))% left · limit hit ~\(shortDateTime(date))"
         } else {
             let unused = forecast.weeklyRemaining - forecast.maxBurnable
-            return "\(Int(unused.rounded()))% expires unused at reset"
+            return "\(Int(unused.rounded()))% of \(Int(forecast.weeklyRemaining.rounded()))% expires unused"
         }
     }
 
@@ -439,6 +462,7 @@ struct BurnForecastView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                .fixedSize(horizontal: false, vertical: true)   // wrap, don't truncate
             }
         }
     }
