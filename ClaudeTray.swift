@@ -17,9 +17,35 @@ let fiveHourWindow: TimeInterval = 5 * 3600
 let sevenDayWindow: TimeInterval = 7 * 24 * 3600
 let weeklyPctPerSession = 11.0   // burn-all model: one maxed 5h session ≈ 11% of the week
 let epsilon = 0.01               // below a hundredth of a percent, treat budget as spent
+let wakeHour = 6                 // asleep from midnight until this hour — no burning then
+
+/// You don't start a session in the middle of the night, so a start landing in the
+/// blackout moves to the morning.
+func nextAwake(_ date: Date) -> Date {
+    let cal = Calendar.current
+    guard cal.component(.hour, from: date) < wakeHour else { return date }
+    return cal.date(bySettingHour: wakeHour, minute: 0, second: 0, of: date) ?? date
+}
+
+/// Seconds of [start, end) falling inside a midnight–wakeHour blackout. A session
+/// running into the small hours can't be maxed, only spent for the part you're up.
+func asleepSpan(from start: Date, to end: Date) -> TimeInterval {
+    let cal = Calendar.current
+    var total: TimeInterval = 0
+    var midnight = cal.startOfDay(for: start)
+    while midnight < end {
+        if let wake = cal.date(byAdding: .hour, value: wakeHour, to: midnight) {
+            total += max(0, min(end, wake).timeIntervalSince(max(start, midnight)))
+        }
+        guard let next = cal.date(byAdding: .day, value: 1, to: midnight) else { break }
+        midnight = next
+    }
+    return total
+}
 
 /// One 5h slot in the burn-all plan. Only slots that actually spend budget are
-/// listed, which caps a plan at ceil(100 / 11) + 1 rows — short enough to show whole.
+/// listed, and a day fits at most ~4 of them, so a plan stays around a dozen rows —
+/// short enough to show whole.
 struct BurnSession: Identifiable {
     let id: Int
     let start: Date
@@ -95,25 +121,34 @@ final class ClaudeMonitor: ObservableObject {
         let active = fiveHourReset.flatMap { $0 > now ? $0 : nil }
         let currentShare = active == nil ? 0 : max(0, 100 - fiveHour) / 100 * weeklyPctPerSession
         let usesCurrent = currentShare > epsilon
-        let freshStart = active ?? now
-        let slots = Int(weekReset.timeIntervalSince(freshStart) / fiveHourWindow) + (usesCurrent ? 1 : 0)
 
         var plan: [BurnSession] = []
+        var slots = 0
         var left = remaining
-        var start = usesCurrent ? now : freshStart
         var finishesAt: Date?
-        while left > epsilon, plan.count < slots {
-            let isCurrent = plan.isEmpty && usesCurrent
+        var cursor = usesCurrent ? now : (active ?? now)
+        // Keep counting slots after the budget runs out — capacity is what's left to
+        // compare against, and only budget-spending sessions become plan rows.
+        while slots < 40 {
+            let isCurrent = slots == 0 && usesCurrent
+            let start = isCurrent ? cursor : nextAwake(cursor)
             let end = isCurrent ? (active ?? start) : start.addingTimeInterval(fiveHourWindow)
-            let burn = min(isCurrent ? currentShare : weeklyPctPerSession, left)
-            left -= burn
-            plan.append(BurnSession(id: plan.count, start: start, isCurrent: isCurrent,
-                                    burn: burn, remainingAfter: max(0, left)))
-            // The final session ends when the budget runs out, not a full 5h in.
-            if left <= epsilon {
-                finishesAt = min(start.addingTimeInterval(burn / weeklyPctPerSession * fiveHourWindow), end)
+            guard end <= weekReset else { break }
+            slots += 1
+            let awake = end.timeIntervalSince(start) - asleepSpan(from: start, to: end)
+            let cap = min(awake / fiveHourWindow * weeklyPctPerSession,
+                          isCurrent ? currentShare : weeklyPctPerSession)
+            let burn = min(cap, left)
+            if burn > epsilon {
+                left -= burn
+                plan.append(BurnSession(id: plan.count, start: start, isCurrent: isCurrent,
+                                        burn: burn, remainingAfter: max(0, left)))
+                // The final session ends when the budget runs out, not a full 5h in.
+                if left <= epsilon {
+                    finishesAt = min(start.addingTimeInterval(burn / weeklyPctPerSession * fiveHourWindow), end)
+                }
             }
-            start = end
+            cursor = end
         }
         return BurnForecast(weeklyRemaining: remaining, sessionsLeft: slots,
                             unburnable: left > epsilon ? left : 0,
@@ -419,7 +454,7 @@ struct BurnForecastView: View {
 
     private var sessionLine: String {
         forecast.canExhaust
-            ? "Needs \(forecast.sessionsNeeded) of \(forecast.sessionsLeft) maxed sessions"
+            ? "Needs \(forecast.sessionsNeeded) of \(forecast.sessionsLeft) sessions"
             : "Needs \(forecast.sessionsNeeded) sessions, only \(forecast.sessionsLeft) fit"
     }
 
