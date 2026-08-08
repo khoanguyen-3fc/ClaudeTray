@@ -20,9 +20,14 @@ cp .build/release/ClaudeTray "$APP/Contents/MacOS/ClaudeTray"
 cp Info.plist "$APP/Contents/Info.plist"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-# Ad-hoc sign — required for UNUserNotificationCenter to work
-codesign --force --deep --sign - "$APP"
-echo "Signed: $APP"
+# Signing is required for UNUserNotificationCenter. Ad-hoc works, but gives every
+# build a new code identity, so macOS re-prompts for Keychain access each time.
+# Set CODESIGN_ID to a stable identity to keep the grant across rebuilds — see
+# `security find-identity -v -p codesigning`. Keep it out of the repo by putting it
+# in .codesign.local (untracked), or export it before running this script.
+[ -f .codesign.local ] && . ./.codesign.local
+codesign --force --deep --sign "${CODESIGN_ID:--}" "$APP"
+echo "Signed: $APP (${CODESIGN_ID:-ad-hoc})"
 
 echo "Built:  $APP"
 echo "Run:    open $APP"

@@ -67,6 +67,18 @@ This compiles the binary with `swift build -c release` and wraps it in `dist/Cla
 
 On first launch, macOS will prompt for Keychain access — choose **Always Allow**. If you want reset notifications, also allow the notification permission prompt.
 
+### Signing (optional, but stops repeat Keychain prompts)
+
+The script signs ad-hoc by default, which gives every build a different code identity — so the Keychain grant you approved stops matching and macOS asks again after each rebuild. Signing with a stable identity keeps the grant:
+
+```bash
+security find-identity -v -p codesigning     # pick one
+echo 'CODESIGN_ID="Apple Development: Your Name (TEAMID)"' > .codesign.local
+bash build-app.sh
+```
+
+`.codesign.local` is gitignored, so your identity stays out of the repo. Expect one final prompt after switching, since the previous ad-hoc grant no longer applies.
+
 ### Auto-start on login
 
 Copy the app to your Applications folder and add it as a Login Item:

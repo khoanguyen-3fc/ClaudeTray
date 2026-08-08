@@ -2,6 +2,8 @@
 dist/
 AppIcon.icns
 AppIcon.iconset/
+# local code signing identity — never commit
+.codesign.local
 
 # Xcode
 #
