@@ -303,9 +303,10 @@ final class ClaudeMonitor: ObservableObject {
             trigger: UNCalendarNotificationTrigger(dateMatching: at, repeats: false)))
     }
 
-    /// Choose "Always Allow" at the macOS prompt. Claude Code rewrites the Keychain
-    /// item whenever it refreshes the token, which resets that grant — so a later
-    /// read can be blocked again. That's recoverable, not missing credentials.
+    /// Choose "Always Allow" at the macOS prompt. Claude Code updates the item in
+    /// place when it refreshes, so the grant survives rotation — but it's keyed to
+    /// our code signature, so an ad-hoc rebuild invalidates it (see build-app.sh).
+    /// Either way a blocked read is recoverable, not missing credentials.
     private func keychainToken() -> TokenState {
         if let token = cachedToken, let expiry = tokenExpiresAt, expiry > Date() {
             return .ok(token)
